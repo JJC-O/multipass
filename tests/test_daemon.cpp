@@ -27,6 +27,7 @@
 #include <multipass/constants.h>
 #include <multipass/logging/log.h>
 #include <multipass/name_generator.h>
+#include <multipass/optional.h>
 #include <multipass/version.h>
 #include <multipass/virtual_machine_factory.h>
 #include <multipass/vm_image_host.h>
@@ -902,8 +903,12 @@ TEST_P(LaunchImgSizeSuite, launches_with_correct_disk_size)
     const auto img_size = mp::MemorySize(img_size_str);
     const auto& available_disk_str = std::get<3>(param);
     const auto available_disk = mp::MemorySize(available_disk_str);
-    const auto requested_disk = mp::MemorySize(
-        other_command_line_parameters.size() > 0 ? other_command_line_parameters[1] : mp::default_disk_size);
+    const mp::optional<mp::MemorySize> requested_disk =
+        other_command_line_parameters.size() > 0 ? mp::make_optional(mp::MemorySize{other_command_line_parameters[1]})
+                                                 : mp::nullopt;
+    const auto reserved_disk = requested_disk
+                                   ? requested_disk->in_bytes()
+                                   : std::min(mp::MemorySize{mp::default_disk_size}.in_bytes(), img_size.in_bytes());
 
     auto mock_image_vault = std::make_unique<NiceMock<mpt::MockVMImageVault>>();
     ON_CALL(*mock_image_vault.get(), minimum_image_size_for(_)).WillByDefault([&img_size_str](auto...) {
@@ -919,7 +924,7 @@ TEST_P(LaunchImgSizeSuite, launches_with_correct_disk_size)
     for (const auto& p : other_command_line_parameters)
         all_parameters.push_back(p);
 
-    if (other_command_line_parameters.size() > 0 && requested_disk < img_size)
+    if (requested_disk && requested_disk.value() < img_size)
     {
         std::stringstream stream;
         EXPECT_CALL(*mock_factory, create_virtual_machine(_, _)).Times(0);
@@ -936,13 +941,13 @@ TEST_P(LaunchImgSizeSuite, launches_with_correct_disk_size)
     else
     {
         auto logger_scope = mpt::MockLogger::inject();
-        if (available_disk < requested_disk)
+        if (available_disk.in_bytes() < reserved_disk)
         {
             logger_scope.mock_logger->screen_logs(mpl::Level::error);
             logger_scope.mock_logger->expect_log(mpl::Level::error, "autostart prerequisites", AtMost(1));
             logger_scope.mock_logger->expect_log(
                 mpl::Level::warning, fmt::format("Reserving more disk space ({} bytes) than available ({} bytes)",
-                                                 requested_disk.in_bytes(), available_disk.in_bytes()));
+                                                 reserved_disk, available_disk.in_bytes()));
         }
         EXPECT_CALL(*mock_factory, create_virtual_machine(_, _));
         send_command(all_parameters);
