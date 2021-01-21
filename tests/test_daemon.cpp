@@ -902,6 +902,8 @@ TEST_P(LaunchImgSizeSuite, launches_with_correct_disk_size)
     const auto img_size = mp::MemorySize(img_size_str);
     const auto& available_disk_str = std::get<3>(param);
     const auto available_disk = mp::MemorySize(available_disk_str);
+    const auto requested_disk = mp::MemorySize(
+        other_command_line_parameters.size() > 0 ? other_command_line_parameters[1] : mp::default_disk_size);
 
     auto mock_image_vault = std::make_unique<NiceMock<mpt::MockVMImageVault>>();
     ON_CALL(*mock_image_vault.get(), minimum_image_size_for(_)).WillByDefault([&img_size_str](auto...) {
@@ -917,7 +919,7 @@ TEST_P(LaunchImgSizeSuite, launches_with_correct_disk_size)
     for (const auto& p : other_command_line_parameters)
         all_parameters.push_back(p);
 
-    if (other_command_line_parameters.size() > 0 && mp::MemorySize(other_command_line_parameters[1]) < img_size)
+    if (other_command_line_parameters.size() > 0 && requested_disk < img_size)
     {
         std::stringstream stream;
         EXPECT_CALL(*mock_factory, create_virtual_machine(_, _)).Times(0);
@@ -933,28 +935,18 @@ TEST_P(LaunchImgSizeSuite, launches_with_correct_disk_size)
     }
     else
     {
+        auto logger_scope = mpt::MockLogger::inject();
+        if (available_disk < requested_disk)
+        {
+            logger_scope.mock_logger->screen_logs(mpl::Level::error);
+            logger_scope.mock_logger->expect_log(mpl::Level::error, "autostart prerequisites", AtMost(1));
+            logger_scope.mock_logger->expect_log(
+                mpl::Level::warning, fmt::format("Reserving more disk space ({} bytes) than available ({} bytes)",
+                                                 requested_disk.in_bytes(), available_disk.in_bytes()));
+        }
         EXPECT_CALL(*mock_factory, create_virtual_machine(_, _));
         send_command(all_parameters);
     }
-}
-
-TEST_P(LaunchStorageCheckSuite, launch_warns_when_overcommitting_disk_space)
-{
-    auto mock_factory = use_a_mock_vm_factory();
-    mp::Daemon daemon{config_builder.build()};
-
-    auto logger_scope = mpt::MockLogger::inject();
-    logger_scope.mock_logger->screen_logs(mpl::Level::error);
-
-    auto available_disk{16'106'127'360}; // 15G
-    REPLACE(filesystem_bytes_available, [&available_disk](auto...) { return available_disk; });
-
-    logger_scope.mock_logger->expect_log(mpl::Level::error, "autostart prerequisites", AtMost(1));
-    logger_scope.mock_logger->expect_log(
-        mpl::Level::warning, fmt::format("Reserving more disk space than available ({} bytes)", available_disk));
-    EXPECT_CALL(*mock_factory, create_virtual_machine(_, _));
-
-    send_command({GetParam(), "--disk", "20G"}, trash_stream, trash_stream);
 }
 
 TEST_P(LaunchStorageCheckSuite, launch_fails_with_invalid_data_directory)
@@ -979,7 +971,8 @@ INSTANTIATE_TEST_SUITE_P(Daemon, MinSpaceViolatedSuite,
 INSTANTIATE_TEST_SUITE_P(Daemon, LaunchImgSizeSuite,
                          Combine(Values("test_create", "launch"),
                                  Values(std::vector<std::string>{}, std::vector<std::string>{"--disk", "4G"}),
-                                 Values("1G", mp::default_disk_size, "10G"), Values("16G", "500MB")));
+                                 Values("1G", mp::default_disk_size, "10G"), // Image size
+                                 Values("16G", "2G", "500MB")));             // Available disk space
 INSTANTIATE_TEST_SUITE_P(Daemon, LaunchStorageCheckSuite, Values("test_create", "launch"));
 
 std::string fake_json_contents(const std::string& default_mac, const std::vector<mp::NetworkInterface>& extra_ifaces)
